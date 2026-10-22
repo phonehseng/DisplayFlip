@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DisplayFlip</title>
+<style>
+  html, body { margin: 0; background: #2d2d2d; color: #d8d8d8; font: 9pt "Segoe UI", sans-serif; }
+  .wrap { padding: 8px 12px 12px 0; }
+  .row { display: flex; align-items: center; min-height: 32px; }
+  .row label { flex: 0 0 96px; text-align: right; padding-right: 12px; color: #969696; }
+  .row select, .row input { flex: 1; min-width: 0; height: 26px; box-sizing: border-box; background: #3d3d3d; color: #d8d8d8;
+    border: none; border-radius: 3px; padding: 0 6px; font: inherit; outline: none; }
+  .row select:focus, .row input:focus { box-shadow: 0 0 0 1px #5b8dd9; }
+  .hint { margin: 6px 0 0 108px; color: #8a8a8a; line-height: 1.45; }
+  .warn { margin: 6px 0 0 108px; color: #e2a23b; display: none; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="monitor" hidden>
+    <div class="row"><label>Display</label><select data-key="monitor"></select></div>
+    <div class="row"><label>Press does</label>
+      <select data-key="mode">
+        <option value="toggle">Turn on / off</option>
+        <option value="on">Always turn on</option>
+        <option value="off">Always turn off</option>
+      </select></div>
+    <div class="hint">Sound moves to the display and back if it is set to <i>"audio": "auto"</i> in DisplayFlip settings. Windows that were on it come back when it turns on.</div>
+  </div>
+  <div id="profile" hidden>
+    <div class="row"><label>Profile</label><select data-key="profile"></select></div>
+    <div class="hint">Create profiles from the DisplayFlip tray icon: <i>Save current layout as profile…</i></div>
+  </div>
+  <div id="toggle" hidden>
+    <div class="row"><label>First</label><select data-key="a"></select></div>
+    <div class="row"><label>Second</label><select data-key="b"></select></div>
+    <div class="hint">The button lights up while the second profile is active.</div>
+  </div>
+  <div id="command" hidden>
+    <div class="row"><label>Command</label><input data-key="command" placeholder='primary "LG ULTRAGEAR+"'></div>
+    <div class="hint">Examples: <i>next</i> · <i>audio "Headphones"</i> · <i>primary "Center"</i> · <i>restore</i></div>
+  </div>
+  <div class="warn" id="offline">DisplayFlip isn't running yet. It starts automatically on the first press.</div>
+</div>
+<script>
+let ws, uuid, action, settings = {}, lists = { monitors: [], profiles: [], defaultMonitor: "" };
+const section = { "com.displayflip.monitor": "monitor", "com.displayflip.profile": "profile",
+                  "com.displayflip.toggle": "toggle", "com.displayflip.command": "command" };
+
+function fill(sel, items, current, placeholder) {
+  sel.innerHTML = "";
+  if (placeholder) sel.add(new Option(placeholder, ""));
+  items.forEach(v => sel.add(new Option(v, v)));
+  if (current && !items.includes(current)) sel.add(new Option(current + " (not found)", current));
+  sel.value = current || (placeholder ? "" : (items[0] || ""));
+}
+
+function render() {
+  const root = document.getElementById(section[action] || "command");
+  root.hidden = false;
+  root.querySelectorAll("select[data-key]").forEach(sel => {
+    const k = sel.dataset.key;
+    if (k === "monitor") fill(sel, lists.monitors, settings.monitor,
+                              "Default (" + (lists.defaultMonitor || "first in settings") + ")");
+    else if (k === "profile" || k === "a" || k === "b") fill(sel, lists.profiles, settings[k]);
+    else if (settings[k]) sel.value = settings[k];
+  });
+  root.querySelectorAll("input[data-key]").forEach(inp => { inp.value = settings[inp.dataset.key] || ""; });
+  // store defaults right away so a fresh button works without touching anything
+  let changed = false;
+  root.querySelectorAll("[data-key]").forEach(el => {
+    if (settings[el.dataset.key] === undefined && el.value) { settings[el.dataset.key] = el.value; changed = true; }
+  });
+  if (changed) save();
+}
+
+function save() { ws && ws.send(JSON.stringify({ event: "setSettings", context: uuid, payload: settings })); }
+
+document.addEventListener("change", e => {
+  const k = e.target.dataset && e.target.dataset.key;
+  if (!k) return;
+  settings[k] = e.target.value;
+  save();
+});
+document.addEventListener("input", e => {
+  if (e.target.tagName === "INPUT" && e.target.dataset.key) { settings[e.target.dataset.key] = e.target.value; save(); }
+});
+
+function connectElgatoStreamDeckSocket(port, piUuid, registerEvent, info, actionInfo) {
+  uuid = piUuid;
+  const ai = JSON.parse(actionInfo);
+  action = ai.action;
+  settings = (ai.payload && ai.payload.settings) || {};
+  render();
+  ws = new WebSocket("ws://127.0.0.1:" + port);
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ event: registerEvent, uuid: piUuid }));
+    ws.send(JSON.stringify({ event: "sendToPlugin", action: action, context: piUuid, payload: { request: "lists" } }));
+  };
+  ws.onmessage = m => {
+    const j = JSON.parse(m.data);
+    if (j.event === "sendToPropertyInspector") {
+      lists = Object.assign(lists, j.payload);
+      document.getElementById("offline").style.display = j.payload.connected ? "none" : "block";
+      render();
+    } else if (j.event === "didReceiveSettings") {
+      settings = j.payload.settings || {};
+      render();
+    }
+  };
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,61 @@
+{
+  "Name": "DisplayFlip",
+  "UUID": "com.displayflip",
+  "Version": "1.0.0.0",
+  "Author": "DisplayFlip",
+  "Description": "One-button display switching: turn a TV or side screen on/off or apply a whole layout. Sound and windows follow automatically.",
+  "Icon": "images/plugin",
+  "Category": "DisplayFlip",
+  "CategoryIcon": "images/category",
+  "CodePathWin": "DisplayFlip.exe",
+  "PropertyInspectorPath": "pi/index.html",
+  "SDKVersion": 2,
+  "Software": { "MinimumVersion": "5.0" },
+  "OS": [{ "Platform": "windows", "MinimumVersion": "10" }],
+  "Actions": [
+    {
+      "UUID": "com.displayflip.monitor",
+      "Name": "Toggle Display",
+      "Tooltip": "Turn a display (TV, side screen, rig screen) on or off. Sound and windows follow it.",
+      "Icon": "images/action_monitor",
+      "States": [
+        { "Image": "images/monitor_off", "Name": "Off" },
+        { "Image": "images/monitor_on", "Name": "On" }
+      ],
+      "DisableAutomaticStates": true,
+      "SupportedInMultiActions": true
+    },
+    {
+      "UUID": "com.displayflip.profile",
+      "Name": "Apply Profile",
+      "Tooltip": "Apply a saved display layout (lights up while it is active).",
+      "Icon": "images/action_profile",
+      "States": [
+        { "Image": "images/profile_off", "Name": "Inactive" },
+        { "Image": "images/profile_on", "Name": "Active" }
+      ],
+      "DisableAutomaticStates": true,
+      "SupportedInMultiActions": true
+    },
+    {
+      "UUID": "com.displayflip.toggle",
+      "Name": "Toggle Profiles",
+      "Tooltip": "Flip between two profiles, e.g. Desk and Rig.",
+      "Icon": "images/action_toggle",
+      "States": [
+        { "Image": "images/toggle_a", "Name": "First" },
+        { "Image": "images/toggle_b", "Name": "Second" }
+      ],
+      "DisableAutomaticStates": true,
+      "SupportedInMultiActions": true
+    },
+    {
+      "UUID": "com.displayflip.command",
+      "Name": "Run Command",
+      "Tooltip": "Any DisplayFlip command, e.g. primary \"LG ULTRAGEAR+\" or audio \"Headphones\".",
+      "Icon": "images/action_command",
+      "States": [{ "Image": "images/command" }],
+      "SupportedInMultiActions": true
+    }
+  ]
+}

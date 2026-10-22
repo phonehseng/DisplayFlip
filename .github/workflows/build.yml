@@ -1,0 +1,32 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths: ["src/**", "streamdeck/**", "assets/**", "build.ps1", ".github/workflows/build.yml"]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (MSYS2 UCRT64 gcc, preinstalled MSYS2 on the runner)
+        shell: pwsh
+        run: C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-gcc"
+      - name: Build
+        shell: pwsh
+        run: ./build.ps1
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path dist/* -DestinationPath DisplayFlip.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DisplayFlip
+          path: dist/
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: DisplayFlip.zip
