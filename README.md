@@ -26,8 +26,9 @@ No dialogs, no "keep these display settings?", no waiting on a settings app.
 DisplayFlip.exe install
 ```
 
-Copies itself to `%LOCALAPPDATA%\Programs\DisplayFlip`, starts with Windows, installs the Stream Deck
-plugin (Stream Deck restarts once), and starts in the tray. No admin rights needed.
+Copies itself to `%LOCALAPPDATA%\Programs\DisplayFlip`, starts with Windows, adds **DisplayFlip** to the
+Start menu, installs the Stream Deck plugin (Stream Deck restarts once), and starts in the tray. No admin
+rights needed. Opening DisplayFlip from the Start menu while it is already running pops up its tray menu.
 `DisplayFlip.exe uninstall` reverses it; settings stay in `%APPDATA%\DisplayFlip`.
 
 To build it yourself: install [MSYS2](https://www.msys2.org/) with `mingw-w64-ucrt-x86_64-gcc`, then run

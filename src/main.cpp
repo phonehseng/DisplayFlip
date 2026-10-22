@@ -68,11 +68,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     for (int i = 0; i < 100 && !app; i++) { Sleep(30); app = FindApp(); }
     if (!app) { ConsolePrint(L"DisplayFlip did not start\n"); return 1; }
   }
+  AllowSetForegroundWindow(ASFW_ANY);  // lets the app take/hand back focus (menu, restoring your window)
   if (cmd.empty()) {
-    if (!background) SendToApp(app, L"osd \"DisplayFlip is running\" \"Right-click its tray icon for options\"", nullptr, 2000);
+    if (!background) SendToApp(app, L"menu", nullptr, 2000);  // opened again (Start menu): show the tray menu
     return 0;
   }
-  AllowSetForegroundWindow(ASFW_ANY);  // lets the app hand focus back to the window you were using
   std::string reply = QueryApp(app, cmd, 15000);
   if (!reply.empty()) ConsolePrint(Widen(reply) + L"\n");
   return reply.rfind("error", 0) == 0 ? 1 : 0;

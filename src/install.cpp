@@ -2,6 +2,7 @@
 #include "app.h"
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 #include <tlhelp32.h>
 
 namespace df {
@@ -17,6 +18,27 @@ std::wstring Known(REFKNOWNFOLDERID id) {
   if (SUCCEEDED(SHGetKnownFolderPath(id, 0, nullptr, &p))) r = p;
   CoTaskMemFree(p);
   return r;
+}
+
+std::wstring StartMenuShortcut() { return Known(FOLDERID_Programs) + L"\\DisplayFlip.lnk"; }
+
+bool CreateShortcut(const std::wstring& lnk, const std::wstring& target) {
+  CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  IShellLinkW* sl = nullptr;
+  bool ok = false;
+  if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&sl))) {
+    sl->SetPath(target.c_str());
+    sl->SetWorkingDirectory(InstallDir().c_str());
+    sl->SetDescription(L"One-button display, window and sound switching");
+    IPersistFile* pf = nullptr;
+    if (SUCCEEDED(sl->QueryInterface(IID_IPersistFile, (void**)&pf))) {
+      ok = SUCCEEDED(pf->Save(lnk.c_str(), TRUE));
+      pf->Release();
+    }
+    sl->Release();
+  }
+  CoUninitialize();
+  return ok;
 }
 
 bool DirExists(const std::wstring& p) {
@@ -197,13 +219,15 @@ int InstallCommand(bool quiet) {
     RegCloseKey(k);
   }
   SetAutostart(true);
+  bool lnk = CreateShortcut(StartMenuShortcut(), target);
   std::wstring sdMsg = L"Stream Deck not found (skipped plugin)";
   if (FileExists(L"C:\\Program Files\\Elgato\\StreamDeck\\StreamDeck.exe") || !RunningImage(L"StreamDeck.exe").empty())
     InstallStreamDeckPlugin(&sdMsg);
   LaunchDetached(QuoteArg(target) + L" --background", false);
   if (!quiet)
-    ConsolePrint(L"DisplayFlip installed to " + dir + L"\n  - starts with Windows\n  - Stream Deck: " + sdMsg +
-          L"\n  - settings: " + DataDir() + L"\\config.json\n");
+    ConsolePrint(L"DisplayFlip installed to " + dir + L"\n  - starts with Windows" +
+                 (lnk ? L"\n  - Start menu: DisplayFlip" : L"") + L"\n  - Stream Deck: " + sdMsg +
+                 L"\n  - settings: " + DataDir() + L"\\config.json\n");
   Log(L"installed to %ls", dir.c_str());
   return 0;
 }
@@ -211,6 +235,7 @@ int InstallCommand(bool quiet) {
 int UninstallCommand() {
   StopRunningApp();
   SetAutostart(false);
+  DeleteFileW(StartMenuShortcut().c_str());
   std::wstring dst = Known(FOLDERID_RoamingAppData) + L"\\Elgato\\StreamDeck\\Plugins\\" + kPluginId;
   if (DirExists(dst)) {
     std::wstring sdExe = RunningImage(L"StreamDeck.exe");

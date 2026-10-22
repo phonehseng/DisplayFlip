@@ -470,6 +470,9 @@ std::string App::Exec(const std::wstring& line, HWND replyTo) {
   } else if (verb == L"reload") {
     ReloadConfig(false);
     reply = "ok";
+  } else if (verb == L"menu") {
+    PostMessageW(wnd_, WM_APP_TRAY, 0, WM_CONTEXTMENU);  // posted, so the caller isn't held while it is open
+    reply = "ok";
   } else if (verb == L"settings" || verb == L"config") {
     ShellOpen(ConfigPath());
     reply = "ok";
