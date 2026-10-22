@@ -148,7 +148,8 @@ F13–F24 make good Stream Deck/macro-key combos because no keyboard uses them.
 ## Turning the TV itself off and on
 
 When DisplayFlip turns a display off, Windows just stops sending it a picture; PC graphics cards can't send
-the HDMI-CEC "standby" signal a console would. Give the display `onTurnOff` / `onTurnOn` commands and
+the HDMI-CEC "standby" or "power on" signals a console would. So without help, a TV that is in standby stays
+dark when you switch to it (DisplayFlip tells you so instead of failing silently). Give the display `onTurnOff` / `onTurnOn` commands and
 DisplayFlip runs them at the right moment: `onTurnOn` right before the output comes back (so the TV wakes in
 parallel), `onTurnOff` once nothing is shown on it any more.
 
@@ -213,8 +214,10 @@ in profiles, but enabling/disabling Surround itself still happens in the NVIDIA 
 - **Hotkey doesn't work**: another app owns that combo; the OSD/log says so. Pick another in settings.
 - **An admin window (Task Manager, elevated terminal) doesn't move back**: Windows blocks normal apps
   from moving elevated windows. Run DisplayFlip elevated if you need that.
-- **TV doesn't come on**: some TVs disconnect HDMI completely in standby; turn the TV on first.
-  `DisplayFlip.exe diag` lists what Windows can see.
+- **TV doesn't come on**: a TV in standby ignores the PC's picture, and a PC can't power a TV on over plain
+  HDMI. DisplayFlip notices within about a second and says "didn't turn on"; turn the TV on with its remote and
+  press again, or give it `onTurnOn` commands (see above). With those, DisplayFlip waits a few seconds for the TV
+  to boot and tries once more. `DisplayFlip.exe diag` lists what Windows can see.
 - **Other display managers**: DisplayFusion's window-position features, DisplayMagician and similar tools can
   fight over the same windows/displays. Turn those features off (or quit those apps) if windows jump twice.
 - Log: tray > *Open log* (`%APPDATA%\DisplayFlip\displayflip.log`, includes timing for every switch).

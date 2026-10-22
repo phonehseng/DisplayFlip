@@ -216,6 +216,8 @@ struct SwitchSpec {
   std::wstring audioBefore, audioAfter, micAfter;
   std::wstring profile, leavingProfile;
   std::vector<HookJob> hooksBefore, hooksAfter;  // "on" hooks wake a TV first, "off" hooks run once it is dark
+  std::vector<std::wstring> expectOn;  // keys of displays this switch must light up
+  std::wstring replay;  // try the command once more after a TV we just woke (CEC/network) had time to start
 };
 
 // A display that is so deeply asleep Windows can't see it: its onTurnOn hook was
@@ -226,6 +228,7 @@ struct PendingWake {
   std::wstring command;
   bool applyAnyway = false;  // profiles go ahead without it if it never shows up
   ULONGLONG since = 0, deadline = 0;
+  ULONGLONG notBefore = 0;  // retries: give the TV a few seconds to boot first
 };
 
 struct ProfileData {
@@ -265,6 +268,7 @@ class App {
   std::string RestoreNow();
   bool DoSwitch(const SwitchSpec& s);
   void StartWake(const std::vector<std::wstring>& names, const std::wstring& command, bool applyAnyway);
+  void StartRetry(const std::vector<std::wstring>& names, const std::wstring& command);
   void CancelWake(bool runOffHooks);
   void OnWakeTimer();
   bool RecentlyWoken(const std::wstring& name);
@@ -686,7 +690,10 @@ std::string App::DoMonitor(const std::wstring& specIn, const std::wstring& actio
       else if (!IsNone(mc->audio)) s.audioAfter = mc->audio;
       s.micAfter = mc->mic;
       if (!RecentlyWoken(mon.name)) s.hooksBefore.push_back({mc->onTurnOn, mon.name, L"on"});
+      if (!s.hooksBefore.empty() && !s.hooksBefore.back().cmds.empty())
+        s.replay = L"monitor " + QuoteArg(mon.label) + L" on";
     }
+    s.expectOn.push_back(key);
   } else {
     std::wstring pp;
     if (const LiveMonitor* p = FindMonitor(mons_, cfg_.preferredPrimary)) pp = p->key;
@@ -726,9 +733,30 @@ void App::StartWake(const std::vector<std::wstring>& names, const std::wstring& 
   wake_.command = command;
   wake_.applyAnyway = applyAnyway;
   wake_.since = NowMs();
+  wake_.notBefore = 0;
   wake_.deadline = NowMs() + (ULONGLONG)std::max(wait, 1000);
   SetTimer(wnd_, T_WAKE, 250, nullptr);
   Log(L"waking %ls, then: %ls", who.c_str(), command.c_str());
+  if (cfg_.osd) osd_.Show(L"Waking " + who + L"…", L"Press again to cancel", OsdKind::Info, wait + 1500, cfg_.osdPosition);
+}
+
+void App::StartRetry(const std::vector<std::wstring>& names, const std::wstring& command) {
+  int wait = 0;
+  std::wstring who;
+  for (auto& n : names) {
+    const MonitorCfg* mc = cfg_.MonitorByName(n);
+    wait = std::max(wait, mc ? mc->waitMs : 15000);
+    who += (who.empty() ? L"" : L", ") + n;
+  }
+  wake_.active = true;
+  wake_.names = names;
+  wake_.command = command;
+  wake_.applyAnyway = false;
+  wake_.since = NowMs();
+  wake_.notBefore = NowMs() + (ULONGLONG)std::min(5000, std::max(wait / 2, 1000));
+  wake_.deadline = NowMs() + (ULONGLONG)std::max(wait, 1000);
+  SetTimer(wnd_, T_WAKE, 250, nullptr);
+  Log(L"%ls not on yet, retrying in a moment: %ls", who.c_str(), command.c_str());
   if (cfg_.osd) osd_.Show(L"Waking " + who + L"…", L"Press again to cancel", OsdKind::Info, wait + 1500, cfg_.osdPosition);
 }
 
@@ -747,6 +775,7 @@ void App::CancelWake(bool runOffHooks) {
 
 void App::OnWakeTimer() {
   if (!wake_.active) { KillTimer(wnd_, T_WAKE); return; }
+  if (NowMs() < wake_.notBefore) return;
   mons_ = QueryMonitors();
   bool all = true;
   for (auto& n : wake_.names) all = all && FindMonitor(mons_, n) != nullptr;
@@ -755,7 +784,7 @@ void App::OnWakeTimer() {
   PendingWake w = wake_;
   wake_.active = false;
   if (all) {
-    Log(L"woken display(s) visible after %llu ms", NowMs() - w.since);
+    Log(w.notBefore ? L"retrying after %llu ms" : L"woken display(s) visible after %llu ms", NowMs() - w.since);
     Exec(w.command, nullptr);
   } else if (w.applyAnyway) {
     Log(L"display(s) did not wake in time, applying without them");
@@ -830,6 +859,10 @@ std::string App::DoProfile(const std::wstring& nameIn) {
     if (!m.active && willOn && !RecentlyWoken(m.name)) s.hooksBefore.push_back({mc->onTurnOn, m.name, L"on"});
     if (m.active && !willOn) s.hooksAfter.push_back({mc->onTurnOff, m.name, L"off"});
   }
+  for (auto& m : mons_)
+    if (!m.active && willBeOn.count(m.key)) s.expectOn.push_back(m.key);
+  for (auto& h : s.hooksBefore)
+    if (!h.cmds.empty()) s.replay = L"profile " + QuoteArg(name);
   AudioDevice def = audio_.Default(false);
   if (pc && !IsNone(pc->audio)) {
     AudioDevice d;
@@ -942,11 +975,29 @@ bool App::DoSwitch(const SwitchSpec& s) {
   // 4) wait (briefly) until the desktop reflects the new topology
   mons_ = QueryMonitors();
   std::wstring newTopo = TopologyKey(mons_);
-  for (int i = 0; ok && s.expectTopologyChange && newTopo == oldTopo && i < 30; i++) {
+  auto notOn = [&]() {
+    std::vector<std::wstring> r;
+    for (auto& k : s.expectOn) {
+      bool on = false;
+      for (auto& m : mons_) on = on || (m.key == k && m.active);
+      if (!on) r.push_back(k);
+    }
+    return r;
+  };
+  for (int i = 0; ok && i < 30 && ((s.expectTopologyChange && newTopo == oldTopo) || !notOn().empty()); i++) {
     Sleep(20);
     mons_ = QueryMonitors();
     newTopo = TopologyKey(mons_);
   }
+  // Windows accepted the layout but a display never lit up: almost always a TV in standby,
+  // which ignores the picture (a PC can't power a TV on over plain HDMI)
+  std::vector<std::wstring> missingLabels, missingNames;
+  if (ok)
+    for (auto& k : notOn())
+      for (auto& m : mons_)
+        if (m.key == k) { missingLabels.push_back(m.label); missingNames.push_back(m.name); }
+  bool retrying = !missingLabels.empty() && !s.replay.empty();
+  if (!missingLabels.empty() && !retrying && newTopo == oldTopo) ok = false;  // nothing changed at all
   topo_ = newTopo;
   fingerprint_ = Fingerprint();
   RefreshMonitorMemory();
@@ -975,8 +1026,10 @@ bool App::DoSwitch(const SwitchSpec& s) {
   }
 
   // 6) sound/mic that only exists after the switch (a TV's HDMI audio shows up a moment later)
+  bool audioOnMissing = false;
+  for (auto& n : missingNames) audioOnMissing = audioOnMissing || IEquals(s.audioAfter, L"monitor:" + n);
   if (ok) {
-    if (!s.audioAfter.empty()) {
+    if (!s.audioAfter.empty() && !audioOnMissing) {
       RequestAudio(s.audioAfter, false);
       if (IStartsWith(s.audioAfter, L"monitor:")) audioOnMonitor_ = s.audioAfter.substr(8);
     }
@@ -1003,7 +1056,18 @@ bool App::DoSwitch(const SwitchSpec& s) {
     if (s.apply) parts.push_back(Format(L"%.1f s", (NowMs() - t0) / 1000.0));
     for (size_t i = 0; i < parts.size(); i++) detail += (i ? L"  \u00b7  " : L"") + parts[i];
   }
-  if (cfg_.osd) osd_.Show(s.title, detail, ok ? OsdKind::Ok : OsdKind::Error, ok ? cfg_.osdMs : 4500, cfg_.osdPosition);
+  std::wstring who;
+  for (auto& l : missingLabels) who += (who.empty() ? L"" : L", ") + l;
+  if (retrying) {
+    StartRetry(missingLabels, s.replay);
+  } else if (!missingLabels.empty()) {
+    Log(L"%ls did not turn on (TV in standby?)", who.c_str());
+    if (cfg_.osd)
+      osd_.Show(who + L" didn't turn on", L"Is the TV in standby? Turn it on with its remote, then press again",
+                ok ? OsdKind::Warn : OsdKind::Error, 5000, cfg_.osdPosition);
+  } else if (cfg_.osd) {
+    osd_.Show(s.title, detail, ok ? OsdKind::Ok : OsdKind::Error, ok ? cfg_.osdMs : 4500, cfg_.osdPosition);
+  }
   Log(L"switch '%ls' %ls: capture %llu ms, displays %llu ms, windows %llu ms, total %llu ms, %d windows back%ls%ls",
       s.title.c_str(), ok ? L"ok" : L"FAILED", t1 - t0, t2 - t1, t3 - t2, NowMs() - t0, back, ok ? L"" : L": ",
       err.c_str());
