@@ -77,6 +77,7 @@ primary "LG ULTRAGEAR+"          make a display the main one
 save "Rig"                       save the current layout as a profile
 audio "Headphones"               set the default playback device (mic "..." for recording)
 restore                          put windows back after the last switch
+hook "Philips GA4" off|on        run a display's onTurnOff/onTurnOn commands (testing)
 status | list | diag | windows   show state (diag also goes to the log)
 settings | log | reload | quit
 ```
@@ -98,7 +99,8 @@ Displays are named as in the tray menu. Identical monitors (triple screens) get 
   "preferredPrimary": "LG ULTRAGEAR+",       // who becomes main if the main display is turned off
 
   "monitors": {
-    "Philips GA4": { "audio": "auto" },      // sound follows this display (its own HDMI audio)
+    "Philips GA4": { "audio": "auto",        // sound follows this display (its own HDMI audio)
+                     "onTurnOff": ["tv-off.cmd"], "onTurnOn": ["tv-on.cmd"] },   // see "Turning the TV itself off"
     "Projector":   { "audio": "Denon AVR" }  // ...or a specific device, e.g. an AV receiver
   },
 
@@ -142,6 +144,41 @@ Displays are named as in the tray menu. Identical monitors (triple screens) get 
 Hotkey keys: `A`–`Z`, `0`–`9`, `F1`–`F24`, `Numpad0`–`Numpad9`, arrows, `Home`, `End`, `PageUp`, `PageDown`,
 `Insert`, `Delete`, `Space`, `Pause`, `ScrollLock`, media keys, punctuation, with `Ctrl`, `Alt`, `Shift`, `Win`.
 F13–F24 make good Stream Deck/macro-key combos because no keyboard uses them.
+
+## Turning the TV itself off and on
+
+When DisplayFlip turns a display off, Windows just stops sending it a picture; PC graphics cards can't send
+the HDMI-CEC "standby" signal a console would. Give the display `onTurnOff` / `onTurnOn` commands and
+DisplayFlip runs them at the right moment: `onTurnOn` right before the output comes back (so the TV wakes in
+parallel), `onTurnOff` once nothing is shown on it any more.
+
+```jsonc
+"monitors": {
+  "Philips GA4": {
+    "audio": "auto",
+    "onTurnOff": ["tv-off.cmd"],
+    "onTurnOn": ["tv-on.cmd"],
+    "waitForDisplayMs": 15000   // a TV that vanishes in standby: how long to wait for it after waking it
+  }
+}
+```
+
+- Commands run hidden, one after another, from `%APPDATA%\DisplayFlip`, with `%DISPLAYFLIP_DISPLAY%` and
+  `%DISPLAYFLIP_EVENT%` (`on`/`off`) set. Their output goes to `hooks.log` in that folder.
+- `DisplayFlip.exe hook "Philips GA4" off` runs the commands without switching anything, for testing.
+- Some TVs disappear from Windows completely in standby. DisplayFlip then shows them in the tray as
+  *(asleep)*: pressing the button runs `onTurnOn`, waits for the TV to show up, then turns it on.
+  Pressing again while it's waking cancels and sends it back to standby.
+
+Ready-made options:
+
+| | |
+|---|---|
+| **USB-CEC adapter** (Pulse-Eight, sits in the HDMI cable) | [`examples/tv-off.cmd`](examples/tv-off.cmd) / [`tv-on.cmd`](examples/tv-on.cmd) use libCEC's `cec-client` (standby / wake + switch input to the PC) |
+| **Google / Android TV over the network** | `adb connect 192.168.1.50 && adb -s 192.168.1.50:5555 shell input keyevent KEYCODE_SLEEP` (`KEYCODE_WAKEUP` to wake; needs network debugging on the TV) |
+| **Home Assistant / smart home** | `curl -s -X POST http://homeassistant.local:8123/api/webhook/tv_off` |
+
+Avoid cutting a TV's power with a smart plug: OLEDs run a screen-care cycle in standby after you turn them off.
 
 ## Sim rig recipe
 

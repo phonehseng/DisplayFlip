@@ -11,6 +11,10 @@ struct MonitorCfg {
   std::wstring match;   // monitor label / name / part of its device path
   std::wstring audio;   // "auto" (its own HDMI/DP audio), "" / "none", or a device name
   std::wstring mic;
+  // commands run when DisplayFlip turns this display on/off (CEC adapter, TV network remote, smart home...)
+  std::vector<std::wstring> onTurnOn, onTurnOff;
+  int waitMs = 15000;   // how long to wait for a display that only appears after onTurnOn wakes it
+  bool HasHooks() const { return !onTurnOn.empty() || !onTurnOff.empty(); }
 };
 
 struct ProfileCfg {
@@ -48,6 +52,7 @@ struct Config {
   std::vector<RuleCfg> rules;
 
   const MonitorCfg* Monitor(const LiveMonitor& m) const;
+  const MonitorCfg* MonitorByName(const std::wstring& spec) const;  // for displays that are not connected
   const ProfileCfg* Profile(const std::wstring& name) const;
 };
 

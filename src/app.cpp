@@ -16,7 +16,7 @@ const wchar_t* kMainClass = L"DisplayFlip.Main";
 namespace {
 
 enum : UINT { WM_APP_TRAY = WM_APP + 1, WM_APP_AUDIO = WM_APP + 2 };
-enum : UINT_PTR { T_PASS = 11, T_AUDIO, T_DISPCHANGE, T_SNAPSHOT, T_CONFIG, T_RULES, T_SAVE };
+enum : UINT_PTR { T_PASS = 11, T_AUDIO, T_DISPCHANGE, T_SNAPSHOT, T_CONFIG, T_RULES, T_SAVE, T_WAKE };
 // Restore passes after a switch: Windows and some apps keep nudging windows for a
 // second or two after the topology changes, so we re-check a few times.
 const int kPassDelays[] = {100, 250, 500, 900, 1600};
@@ -24,7 +24,7 @@ const int kHotkeyBase = 100;
 
 enum : UINT {
   ID_SAVE_NEW = 100, ID_SETTINGS, ID_LOG, ID_AUTOSTART, ID_RELOAD, ID_EXIT, ID_RESTORE, ID_FOLDER, ID_STREAMDECK,
-  ID_PROFILE = 1000, ID_MONITOR = 2000, ID_UPDATE = 3000, ID_DELETE = 4000, ID_PRIMARY = 5000
+  ID_PROFILE = 1000, ID_MONITOR = 2000, ID_UPDATE = 3000, ID_DELETE = 4000, ID_PRIMARY = 5000, ID_WAKE = 6000
 };
 
 bool IsNone(const std::wstring& s) { return s.empty() || IEquals(s, L"none") || IEquals(s, L"off"); }
@@ -145,12 +145,87 @@ bool PromptText(HINSTANCE inst, const std::wstring& title, const std::wstring& l
   return c.ok;
 }
 
+// ---- per-display hooks (CEC adapter, TV network remote, smart home...) -----
+struct HookJob {
+  std::vector<std::wstring> cmds;
+  std::wstring display, event;
+};
+
+// Runs a display's commands one after another on a worker thread (so a slow
+// cec-client never holds up a switch). Output goes to hooks.log.
+DWORD WINAPI HookThread(LPVOID p) {
+  std::unique_ptr<HookJob> job((HookJob*)p);
+  std::wstring dir = DataDir();
+  SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+  HANDLE out = CreateFileW((dir + L"\\hooks.log").c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  HANDLE in = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+  // environment for the commands: ours plus DISPLAYFLIP_DISPLAY / DISPLAYFLIP_EVENT
+  std::wstring env;
+  if (wchar_t* e = GetEnvironmentStringsW()) {
+    for (wchar_t* v = e; *v; v += wcslen(v) + 1) env.append(v).push_back(L'\0');
+    FreeEnvironmentStringsW(e);
+  }
+  env.append(L"DISPLAYFLIP_DISPLAY=" + job->display).push_back(L'\0');
+  env.append(L"DISPLAYFLIP_EVENT=" + job->event).push_back(L'\0');
+  env.push_back(L'\0');
+  for (auto& c : job->cmds) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    std::string head = Narrow(Format(L"\r\n[%02d:%02d:%02d] %ls turned %ls: %ls\r\n", st.wHour, st.wMinute, st.wSecond,
+                                     job->display.c_str(), job->event.c_str(), c.c_str()));
+    DWORD w;
+    if (out != INVALID_HANDLE_VALUE) WriteFile(out, head.data(), (DWORD)head.size(), &w, nullptr);
+    STARTUPINFOW si = {sizeof(si)};
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdInput = in;
+    si.hStdOutput = si.hStdError = out;
+    PROCESS_INFORMATION pi = {};
+    std::wstring cl = L"cmd.exe /d /s /c \"" + c + L"\"";
+    ULONGLONG t0 = NowMs();
+    if (!CreateProcessW(nullptr, &cl[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                        (LPVOID)env.data(), dir.c_str(), &si, &pi)) {
+      Log(L"hook (%ls %ls) could not start: %ls (error %lu)", job->display.c_str(), job->event.c_str(), c.c_str(),
+          GetLastError());
+      continue;
+    }
+    DWORD code = 0;
+    if (WaitForSingleObject(pi.hProcess, 30000) == WAIT_TIMEOUT) Log(L"hook still running after 30 s: %ls", c.c_str());
+    GetExitCodeProcess(pi.hProcess, &code);
+    Log(L"hook (%ls %ls) exit %lu after %llu ms: %ls", job->display.c_str(), job->event.c_str(), code, NowMs() - t0,
+        c.c_str());
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+  }
+  if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+  if (in != INVALID_HANDLE_VALUE) CloseHandle(in);
+  return 0;
+}
+
+void RunHooks(const std::vector<std::wstring>& cmds, const std::wstring& display, const wchar_t* event) {
+  if (cmds.empty()) return;
+  HANDLE t = CreateThread(nullptr, 0, HookThread, new HookJob{cmds, display, event}, 0, nullptr);
+  if (t) CloseHandle(t);
+}
+
 struct SwitchSpec {
   std::wstring title;
   std::function<bool(std::wstring*)> apply;  // display change, may be empty
   bool expectTopologyChange = false;
   std::wstring audioBefore, audioAfter, micAfter;
   std::wstring profile, leavingProfile;
+  std::vector<HookJob> hooksBefore, hooksAfter;  // "on" hooks wake a TV first, "off" hooks run once it is dark
+};
+
+// A display that is so deeply asleep Windows can't see it: its onTurnOn hook was
+// run and we wait for it to show up, then replay the command.
+struct PendingWake {
+  bool active = false;
+  std::vector<std::wstring> names;
+  std::wstring command;
+  bool applyAnyway = false;  // profiles go ahead without it if it never shows up
+  ULONGLONG since = 0, deadline = 0;
 };
 
 struct ProfileData {
@@ -189,6 +264,11 @@ class App {
   std::string DeleteProfile(const std::wstring& name);
   std::string RestoreNow();
   bool DoSwitch(const SwitchSpec& s);
+  void StartWake(const std::vector<std::wstring>& names, const std::wstring& command, bool applyAnyway);
+  void CancelWake(bool runOffHooks);
+  void OnWakeTimer();
+  bool RecentlyWoken(const std::wstring& name);
+  std::vector<std::wstring> AsleepDisplays();  // configured with onTurnOn but not visible to Windows
 
   // audio
   bool ResolveAudio(const std::wstring& spec, bool capture, AudioDevice& out);
@@ -257,6 +337,9 @@ class App {
   std::vector<std::pair<HWND, ULONGLONG>> rulePending_;
   std::vector<std::wstring> menuProfiles_;
   std::vector<LiveMonitor> menuMons_;
+  std::vector<std::wstring> menuAsleep_;
+  PendingWake wake_;
+  std::map<std::wstring, ULONGLONG> recentWake_;  // lower-case name -> when its onTurnOn hook last ran
   bool trayAdded_ = false;
 };
 
@@ -379,6 +462,7 @@ LRESULT App::Proc(HWND h, UINT m, WPARAM w, LPARAM l) {
           break;
         case T_RULES: ProcessPendingRules(); break;
         case T_SAVE: KillTimer(h, T_SAVE); SaveState(); break;
+        case T_WAKE: OnWakeTimer(); break;
       }
       return 0;
     case WM_APP_AUDIO:
@@ -421,6 +505,7 @@ std::string App::Exec(const std::wstring& line, HWND replyTo) {
   bool isSwitch = verb == L"monitor" || verb == L"display" || verb == L"tv" || verb == L"profile" || verb == L"toggle" ||
                   verb == L"next" || verb == L"primary";
   Log(L"command: %ls", line.c_str());
+  if (isSwitch && wake_.active && verb != L"monitor" && verb != L"display" && verb != L"tv") CancelWake(false);
   if (isSwitch && switching_) {
     reply = "busy";
   } else if (isSwitch && lastSwitchEnd_ && NowMs() - lastSwitchEnd_ < (ULONGLONG)cfg_.debounceMs) {
@@ -470,6 +555,16 @@ std::string App::Exec(const std::wstring& line, HWND replyTo) {
   } else if (verb == L"reload") {
     ReloadConfig(false);
     reply = "ok";
+  } else if (verb == L"hook") {
+    // run a display's onTurnOn/onTurnOff commands without switching (to test a CEC/network setup)
+    const MonitorCfg* mc = cfg_.MonitorByName(arg(1));
+    bool on = IEquals(arg(2), L"on");
+    if (!mc || (on ? mc->onTurnOn : mc->onTurnOff).empty()) {
+      reply = "error: no onTurnOn/onTurnOff commands for that display in settings";
+    } else {
+      RunHooks(on ? mc->onTurnOn : mc->onTurnOff, mc->match, on ? L"on" : L"off");
+      reply = "ok: running, output goes to " + Narrow(DataDir()) + "\\hooks.log";
+    }
   } else if (verb == L"menu") {
     PostMessageW(wnd_, WM_APP_TRAY, 0, WM_CONTEXTMENU);  // posted, so the caller isn't held while it is open
     reply = "ok";
@@ -538,8 +633,30 @@ bool App::AudioIsOn(const MonitorCfg& mc, const LiveMonitor& m) {
 std::string App::DoMonitor(const std::wstring& specIn, const std::wstring& actionIn) {
   mons_ = QueryMonitors();
   std::wstring spec = specIn.empty() ? DefaultMonitorSpec() : specIn;
+  std::wstring action = actionIn.empty() ? L"toggle" : actionIn;
+  if (wake_.active) {
+    // pressed again while this display is still waking up: never mind, send it back to sleep
+    const MonitorCfg* wmc = cfg_.MonitorByName(spec);
+    bool same = false;
+    for (auto& n : wake_.names) same = same || IEquals(n, spec) || (wmc && IEquals(n, wmc->match));
+    if (same && action != L"on") {
+      CancelWake(true);
+      return "ok: cancelled";
+    }
+    CancelWake(false);
+  }
   const LiveMonitor* found = FindMonitor(mons_, spec);
   if (!found) {
+    // so deeply asleep that Windows can't see it: wake it with its onTurnOn hook, then turn it on
+    const MonitorCfg* mc = cfg_.MonitorByName(spec);
+    if (mc && !mc->onTurnOn.empty() && action != L"off") {
+      StartWake({mc->match}, L"monitor " + QuoteArg(mc->match) + L" on", false);
+      return "ok: waking";
+    }
+    if (mc && action == L"off") {
+      RunHooks(mc->onTurnOff, mc->match, L"off");
+      return "ok: already off";
+    }
     if (cfg_.osd)
       osd_.Show(L"Can't find display \"" + spec + L"\"", L"Is it plugged in and powered on?", OsdKind::Error, 3000,
                 cfg_.osdPosition);
@@ -548,9 +665,10 @@ std::string App::DoMonitor(const std::wstring& specIn, const std::wstring& actio
   }
   LiveMonitor mon = *found;
   const MonitorCfg* mc = cfg_.Monitor(mon);
-  std::wstring action = actionIn.empty() ? L"toggle" : actionIn;
   bool on = action == L"on" ? true : action == L"off" ? false : !mon.active;
   if (on == mon.active) {
+    // Windows already has it that way, but the TV itself may not (its own remote, "no signal" screen...)
+    if (mc) RunHooks(on ? mc->onTurnOn : mc->onTurnOff, mon.name, on ? L"on" : L"off");
     if (on && mc && !IsNone(mc->audio)) RequestAudio(IEquals(mc->audio, L"auto") ? L"monitor:" + mon.name : mc->audio, false);
     if (cfg_.osd) osd_.Show(mon.label + (on ? L" is on" : L" is off"), L"", OsdKind::Info, 1000, cfg_.osdPosition);
     return "ok: unchanged";
@@ -567,6 +685,7 @@ std::string App::DoMonitor(const std::wstring& specIn, const std::wstring& actio
       if (IEquals(mc->audio, L"auto")) s.audioAfter = L"monitor:" + mon.name;
       else if (!IsNone(mc->audio)) s.audioAfter = mc->audio;
       s.micAfter = mc->mic;
+      if (!RecentlyWoken(mon.name)) s.hooksBefore.push_back({mc->onTurnOn, mon.name, L"on"});
     }
   } else {
     std::wstring pp;
@@ -574,8 +693,81 @@ std::string App::DoMonitor(const std::wstring& specIn, const std::wstring& actio
     s.apply = [key, pp](std::wstring* err) { return DisableMonitor(key, pp, err); };
     if (mc && AudioIsOn(*mc, mon)) s.audioBefore = L"previous";
     if (mc && !mc->mic.empty()) s.micAfter = L"previous";
+    if (mc) s.hooksAfter.push_back({mc->onTurnOff, mon.name, L"off"});
   }
   return DoSwitch(s) ? "ok" : "error";
+}
+
+bool App::RecentlyWoken(const std::wstring& name) {
+  auto it = recentWake_.find(Lower(name));
+  return it != recentWake_.end() && NowMs() - it->second < 60000;
+}
+
+std::vector<std::wstring> App::AsleepDisplays() {
+  std::vector<std::wstring> out;
+  for (auto& c : cfg_.monitors)
+    if (!c.onTurnOn.empty() && !FindMonitor(mons_, c.match)) out.push_back(c.match);
+  return out;
+}
+
+void App::StartWake(const std::vector<std::wstring>& names, const std::wstring& command, bool applyAnyway) {
+  int wait = 0;
+  std::wstring who;
+  for (auto& n : names) {
+    if (const MonitorCfg* mc = cfg_.MonitorByName(n)) {
+      RunHooks(mc->onTurnOn, n, L"on");
+      wait = std::max(wait, mc->waitMs);
+    }
+    recentWake_[Lower(n)] = NowMs();
+    who += (who.empty() ? L"" : L", ") + n;
+  }
+  wake_.active = true;
+  wake_.names = names;
+  wake_.command = command;
+  wake_.applyAnyway = applyAnyway;
+  wake_.since = NowMs();
+  wake_.deadline = NowMs() + (ULONGLONG)std::max(wait, 1000);
+  SetTimer(wnd_, T_WAKE, 250, nullptr);
+  Log(L"waking %ls, then: %ls", who.c_str(), command.c_str());
+  if (cfg_.osd) osd_.Show(L"Waking " + who + L"…", L"Press again to cancel", OsdKind::Info, wait + 1500, cfg_.osdPosition);
+}
+
+void App::CancelWake(bool runOffHooks) {
+  if (!wake_.active) return;
+  KillTimer(wnd_, T_WAKE);
+  wake_.active = false;
+  Log(L"wake cancelled");
+  if (!runOffHooks) return;
+  for (auto& n : wake_.names) {
+    if (const MonitorCfg* mc = cfg_.MonitorByName(n)) RunHooks(mc->onTurnOff, n, L"off");
+    recentWake_.erase(Lower(n));
+  }
+  if (cfg_.osd) osd_.Show(L"Cancelled", L"", OsdKind::Info, 1000, cfg_.osdPosition);
+}
+
+void App::OnWakeTimer() {
+  if (!wake_.active) { KillTimer(wnd_, T_WAKE); return; }
+  mons_ = QueryMonitors();
+  bool all = true;
+  for (auto& n : wake_.names) all = all && FindMonitor(mons_, n) != nullptr;
+  if (!all && NowMs() < wake_.deadline) return;
+  KillTimer(wnd_, T_WAKE);
+  PendingWake w = wake_;
+  wake_.active = false;
+  if (all) {
+    Log(L"woken display(s) visible after %llu ms", NowMs() - w.since);
+    Exec(w.command, nullptr);
+  } else if (w.applyAnyway) {
+    Log(L"display(s) did not wake in time, applying without them");
+    Exec(w.command, nullptr);  // RecentlyWoken() keeps it from waiting again
+  } else {
+    std::wstring who;
+    for (auto& n : w.names) who += (who.empty() ? L"" : L", ") + n;
+    Log(L"%ls did not show up after waking", who.c_str());
+    if (cfg_.osd)
+      osd_.Show(who + L" didn't come on", L"Check the TV, and hooks.log in the data folder", OsdKind::Error, 4000,
+                cfg_.osdPosition);
+  }
 }
 
 std::wstring App::ResolveProfile(const std::wstring& name) {
@@ -610,6 +802,17 @@ std::string App::DoProfile(const std::wstring& nameIn) {
     CaptureSnap(cur);
     std::set<std::wstring> connected;
     for (auto& m : mons_) connected.insert(m.key);
+    // displays this profile needs that are asleep beyond Windows' sight: wake them first
+    std::vector<std::wstring> wake;
+    for (auto& p : pd.snap.paths) {
+      if (connected.count(p.key) || p.name.empty()) continue;
+      const MonitorCfg* mc = cfg_.MonitorByName(p.name);
+      if (mc && !mc->onTurnOn.empty() && !RecentlyWoken(mc->match)) wake.push_back(mc->match);
+    }
+    if (!wake.empty()) {
+      StartWake(wake, L"profile " + QuoteArg(name), true);
+      return "ok: waking";
+    }
     for (auto& p : pd.snap.paths)
       if (connected.count(p.key)) willBeOn.insert(p.key);
     if (!SnapMatchesCurrent(pd.snap, cur, mons_)) {
@@ -619,6 +822,13 @@ std::string App::DoProfile(const std::wstring& nameIn) {
     }
   } else {
     willBeOn = nowOn;
+  }
+  for (auto& m : mons_) {
+    const MonitorCfg* mc = cfg_.Monitor(m);
+    if (!mc || !mc->HasHooks()) continue;
+    bool willOn = willBeOn.count(m.key) > 0;
+    if (!m.active && willOn && !RecentlyWoken(m.name)) s.hooksBefore.push_back({mc->onTurnOn, m.name, L"on"});
+    if (m.active && !willOn) s.hooksAfter.push_back({mc->onTurnOff, m.name, L"off"});
   }
   AudioDevice def = audio_.Default(false);
   if (pc && !IsNone(pc->audio)) {
@@ -712,6 +922,10 @@ bool App::DoSwitch(const SwitchSpec& s) {
     audioOnMonitor_.clear();
   if (!s.leavingProfile.empty() && !IEquals(s.leavingProfile, s.profile))
     if (const ProfileCfg* lp = cfg_.Profile(s.leavingProfile)) CloseApps(lp->closeOnLeave);
+  for (auto& h : s.hooksBefore) {  // wake TVs (CEC/network) while Windows brings the output up
+    RunHooks(h.cmds, h.display, h.event.c_str());
+    if (!h.cmds.empty()) recentWake_[Lower(h.display)] = NowMs();
+  }
 
   // 3) displays
   bool ok = true;
@@ -722,6 +936,8 @@ bool App::DoSwitch(const SwitchSpec& s) {
     ok = s.apply(&err);
   }
   ULONGLONG t2 = NowMs();
+  if (ok)  // e.g. put the TV into standby now that nothing is shown on it
+    for (auto& h : s.hooksAfter) RunHooks(h.cmds, h.display, h.event.c_str());
 
   // 4) wait (briefly) until the desktop reflects the new topology
   mons_ = QueryMonitors();
@@ -1289,7 +1505,18 @@ std::string App::StatusJson(bool withAudio) {
     o.set("primary", Json(m.primary));
     ms.push(o);
   }
+  for (auto& n : AsleepDisplays()) {
+    Json o = Json::Obj();
+    o.set("label", Json(n));
+    o.set("name", Json(n));
+    o.set("key", Json(""));
+    o.set("active", Json(false));
+    o.set("primary", Json(false));
+    o.set("asleep", Json(true));
+    ms.push(o);
+  }
   j.set("monitors", ms);
+  j.set("waking", Json(wake_.active));
   Json ps = Json::Arr();
   for (auto& n : ProfileNames()) ps.push(Json(n));
   j.set("profiles", ps);
@@ -1327,6 +1554,11 @@ std::string App::Diag() {
   s += L"\r\nHotkeys:\r\n";
   for (auto& hk : cfg_.hotkeys) s += L"    " + hk.first + L" -> " + hk.second + L"\r\n";
   for (auto& e : hotkeyErrors_) s += L"    problem: " + e + L"\r\n";
+  s += L"\r\nDisplay hooks:\r\n";
+  for (auto& c : cfg_.monitors) {
+    for (auto& h : c.onTurnOn) s += L"    " + c.match + L" on:  " + h + L"\r\n";
+    for (auto& h : c.onTurnOff) s += L"    " + c.match + L" off: " + h + L"\r\n";
+  }
   s += L"\r\nSettings: " + ConfigPath() + L"\r\nLog: " + LogPath() + L"\r\n";
   return Narrow(s);
 }
@@ -1430,6 +1662,9 @@ void App::ShowMenu() {
     AppendMenuW(m, MF_STRING | (mon.active ? MF_CHECKED : 0), ID_MONITOR + i, t.c_str());
     if (mon.active) AppendMenuW(prim, MF_STRING | (mon.primary ? MF_CHECKED : 0), ID_PRIMARY + i, mon.label.c_str());
   }
+  menuAsleep_ = AsleepDisplays();
+  for (size_t i = 0; i < menuAsleep_.size(); i++)
+    AppendMenuW(m, MF_STRING, ID_WAKE + i, (menuAsleep_[i] + L"  (asleep - click to wake)").c_str());
   AppendMenuW(m, MF_POPUP, (UINT_PTR)prim, L"Main display");
   AppendMenuW(m, MF_STRING | (lastPlan_.empty() ? MF_GRAYED : 0), ID_RESTORE, L"Put windows back");
   AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -1451,7 +1686,9 @@ void App::ShowMenu() {
 }
 
 void App::OnMenu(UINT id) {
-  if (id >= ID_PRIMARY && id < ID_PRIMARY + menuMons_.size()) {
+  if (id >= ID_WAKE && id < ID_WAKE + menuAsleep_.size()) {
+    Exec(L"monitor " + QuoteArg(menuAsleep_[id - ID_WAKE]) + L" on", nullptr);
+  } else if (id >= ID_PRIMARY && id < ID_PRIMARY + menuMons_.size()) {
     Exec(L"primary " + QuoteArg(menuMons_[id - ID_PRIMARY].label), nullptr);
   } else if (id >= ID_DELETE && id < ID_DELETE + menuProfiles_.size()) {
     Exec(L"delete " + QuoteArg(menuProfiles_[id - ID_DELETE]), nullptr);
