@@ -344,6 +344,13 @@ class App {
   std::vector<std::wstring> menuAsleep_;
   PendingWake wake_;
   std::map<std::wstring, ULONGLONG> recentWake_;  // lower-case name -> when its onTurnOn hook last ran
+  // a TV woken by its onTurnOn hook (CEC, Google, network) needs a few seconds to boot: keep retrying
+  // the switch until its waitForDisplayMs runs out
+  struct RetryWindow {
+    ULONGLONG until;
+    std::wstring command;
+  };
+  std::map<std::wstring, RetryWindow> retryWin_;  // lower-case label
   bool trayAdded_ = false;
 };
 
@@ -753,8 +760,8 @@ void App::StartRetry(const std::vector<std::wstring>& names, const std::wstring&
   wake_.command = command;
   wake_.applyAnyway = false;
   wake_.since = NowMs();
-  wake_.notBefore = NowMs() + (ULONGLONG)std::min(5000, std::max(wait / 2, 1000));
-  wake_.deadline = NowMs() + (ULONGLONG)std::max(wait, 1000);
+  wake_.notBefore = NowMs() + 3000;
+  wake_.deadline = wake_.notBefore + 5000;
   SetTimer(wnd_, T_WAKE, 250, nullptr);
   Log(L"%ls not on yet, retrying in a moment: %ls", who.c_str(), command.c_str());
   if (cfg_.osd) osd_.Show(L"Waking " + who + L"…", L"Press again to cancel", OsdKind::Info, wait + 1500, cfg_.osdPosition);
@@ -765,6 +772,7 @@ void App::CancelWake(bool runOffHooks) {
   KillTimer(wnd_, T_WAKE);
   wake_.active = false;
   Log(L"wake cancelled");
+  for (auto& n : wake_.names) retryWin_.erase(Lower(n));
   if (!runOffHooks) return;
   for (auto& n : wake_.names) {
     if (const MonitorCfg* mc = cfg_.MonitorByName(n)) RunHooks(mc->onTurnOff, n, L"off");
@@ -996,7 +1004,23 @@ bool App::DoSwitch(const SwitchSpec& s) {
     for (auto& k : notOn())
       for (auto& m : mons_)
         if (m.key == k) { missingLabels.push_back(m.label); missingNames.push_back(m.name); }
-  bool retrying = !missingLabels.empty() && !s.replay.empty();
+  std::wstring retryCmd;
+  if (!missingLabels.empty() && !s.replay.empty()) {  // we just ran its onTurnOn hook: give it time to boot
+    for (auto& l : missingLabels) {
+      const MonitorCfg* mc = cfg_.MonitorByName(l);
+      retryWin_[Lower(l)] = {NowMs() + (ULONGLONG)(mc ? mc->waitMs : 15000), s.replay};
+    }
+    retryCmd = s.replay;
+  } else {
+    for (auto& l : missingLabels) {
+      auto it = retryWin_.find(Lower(l));
+      if (it != retryWin_.end() && NowMs() < it->second.until) retryCmd = it->second.command;
+    }
+  }
+  for (auto& k : s.expectOn)  // came on: its retry window is done
+    for (auto& m : mons_)
+      if (m.key == k && m.active) retryWin_.erase(Lower(m.label));
+  bool retrying = !retryCmd.empty();
   if (!missingLabels.empty() && !retrying && newTopo == oldTopo) ok = false;  // nothing changed at all
   topo_ = newTopo;
   fingerprint_ = Fingerprint();
@@ -1059,7 +1083,7 @@ bool App::DoSwitch(const SwitchSpec& s) {
   std::wstring who;
   for (auto& l : missingLabels) who += (who.empty() ? L"" : L", ") + l;
   if (retrying) {
-    StartRetry(missingLabels, s.replay);
+    StartRetry(missingLabels, retryCmd);
   } else if (!missingLabels.empty()) {
     Log(L"%ls did not turn on (TV in standby?)", who.c_str());
     if (cfg_.osd)

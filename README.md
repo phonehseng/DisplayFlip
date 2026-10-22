@@ -175,11 +175,29 @@ Ready-made options:
 
 | | |
 |---|---|
+| **Google TV / Google Home** (no hardware; works even when the PC and TV can't see each other on the network) | [`examples/tv-google.cmd`](examples/tv-google.cmd) sends "turn off dorm TV" / "turn on dorm TV" through your Google account. One-time setup below |
 | **USB-CEC adapter** (Pulse-Eight, sits in the HDMI cable) | [`examples/tv-off.cmd`](examples/tv-off.cmd) / [`tv-on.cmd`](examples/tv-on.cmd) use libCEC's `cec-client` (standby / wake + switch input to the PC) |
 | **Google / Android TV over the network** | `adb connect 192.168.1.50 && adb -s 192.168.1.50:5555 shell input keyevent KEYCODE_SLEEP` (`KEYCODE_WAKEUP` to wake; needs network debugging on the TV) |
 | **Home Assistant / smart home** | `curl -s -X POST http://homeassistant.local:8123/api/webhook/tv_off` |
 
 Avoid cutting a TV's power with a smart plug: OLEDs run a screen-care cycle in standby after you turn them off.
+
+### Google TV setup (tv-google)
+
+1. **On the TV**, turn on **Network standby** and **Wake on network** (Settings → System → Power and energy, or
+   Network & Internet), and set **Cast** to available **Always**. With these, a TV in standby also wakes up by
+   itself when the PC's picture arrives, so turning it on works even without Google.
+2. **Google Cloud** (free, no billing): create a project, enable the **Google Assistant API**, set up the
+   OAuth consent screen (External; homepage and privacy links are required to publish; publish it so the sign-in
+   doesn't expire after 7 days), create an OAuth client of type **Desktop app** and save its JSON as
+   `%APPDATA%\DisplayFlip\client_secret.json`.
+3. Run `tv-google.cmd setup` in `%APPDATA%\DisplayFlip` once (installs its Python packages, then asks you to
+   approve in the browser; the app is unverified, so use Advanced → Go to DisplayFlip).
+4. In settings: `"onTurnOff": ["tv-google.cmd off dorm TV"], "onTurnOn": ["tv-google.cmd on dorm TV"]`, using the
+   TV's name from the Google Home app. `tv-google.cmd say is dorm TV on` sends any other command.
+
+Notes: commands take about 2–3 s. Google doesn't charge for this API. It's an older Google API that may be
+retired as Google moves to Gemini; the CEC adapter is the fallback.
 
 ## Sim rig recipe
 
