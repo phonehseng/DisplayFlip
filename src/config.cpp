@@ -72,6 +72,7 @@ bool LoadConfig(const std::wstring& path, Config& out, std::wstring* err) {
       m.onTurnOn = kv.second["onTurnOn"].strList();
       m.onTurnOff = kv.second["onTurnOff"].strList();
       m.waitMs = (int)kv.second.num("waitForDisplayMs", m.waitMs);
+      m.followPower = kv.second.boolean("followPower", false);
     }
     c.monitors.push_back(m);
   }

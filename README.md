@@ -196,6 +196,15 @@ Avoid cutting a TV's power with a smart plug: OLEDs run a screen-care cycle in s
 4. In settings: `"onTurnOff": ["tv-google.cmd off dorm TV"], "onTurnOn": ["tv-google.cmd on dorm TV"]`, using the
    TV's name from the Google Home app. `tv-google.cmd say is dorm TV on` sends any other command.
 
+### Following the TV's own remote (`followPower`)
+
+`"followPower": true` on a display makes DisplayFlip follow its power button: when you turn the TV on with its
+own remote, DisplayFlip switches to it (picture, sound, windows); when you turn it off, everything goes back to
+the desk. It works because a TV switching on or off briefly "re-plugs" its HDMI connection, which Windows
+reports. That blip doesn't say which way the TV went, so DisplayFlip flips its own mode, and ignores blips for
+90 s after switching to the TV (some TVs blip again once they finish booting) and 10 s after switching away. If
+it ever guesses wrong while the TV is actually off, nothing lights up and it simply stays at the desk.
+
 Notes: commands take about 2–3 s. Google doesn't charge for this API. It's an older Google API that may be
 retired as Google moves to Gemini; the CEC adapter is the fallback.
 

@@ -40,9 +40,22 @@ def say(text):
 
     with open(CREDS) as f:
         creds = google.oauth2.credentials.Credentials(token=None, **json.load(f))
-    with TextAssistant(creds, language_code="en-US") as assistant:
+    # Google no longer fills in the text reply; the words it would show on a screen are in the HTML
+    with TextAssistant(creds, language_code="en-US", display=True) as assistant:
         reply = assistant.assist(text)
-    print(f"> {text}\n{reply[0] or '(done, no text reply)'}")
+    answer = reply[0] or screen_text(reply[1]) or "(no reply)"
+    print(f"> {text}\n{answer}")
+
+
+def screen_text(html):
+    import re
+
+    if not html:
+        return ""
+    if isinstance(html, bytes):
+        html = html.decode("utf-8", "replace")
+    html = re.sub(r"(?is)<(style|script)[^>]*>.*?</\1>", " ", html)
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
 
 
 def main(argv):

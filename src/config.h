@@ -14,6 +14,9 @@ struct MonitorCfg {
   // commands run when DisplayFlip turns this display on/off (CEC adapter, TV network remote, smart home...)
   std::vector<std::wstring> onTurnOn, onTurnOff;
   int waitMs = 15000;   // how long to wait for a display that only appears after onTurnOn wakes it
+  // follow the display's own power button: when its cable "blips" (TV turned on/off with its remote),
+  // flip between using it and not using it
+  bool followPower = false;
   bool HasHooks() const { return !onTurnOn.empty() || !onTurnOff.empty(); }
 };
 

@@ -6,6 +6,7 @@
 #include "resource.h"
 #include "winlayout.h"
 #include <shellapi.h>
+#include <dbt.h>
 #include <shellscalingapi.h>
 #include <cmath>
 
@@ -16,7 +17,8 @@ const wchar_t* kMainClass = L"DisplayFlip.Main";
 namespace {
 
 enum : UINT { WM_APP_TRAY = WM_APP + 1, WM_APP_AUDIO = WM_APP + 2 };
-enum : UINT_PTR { T_PASS = 11, T_AUDIO, T_DISPCHANGE, T_SNAPSHOT, T_CONFIG, T_RULES, T_SAVE, T_WAKE };
+enum : UINT_PTR { T_PASS = 11, T_AUDIO, T_DISPCHANGE, T_SNAPSHOT, T_CONFIG, T_RULES, T_SAVE, T_WAKE, T_FOLLOW };
+const GUID kMonitorInterface = {0xE6F07B5F, 0xEE97, 0x4A90, {0xB0, 0x76, 0x33, 0xF5, 0x7B, 0xF4, 0xEA, 0xA7}};
 // Restore passes after a switch: Windows and some apps keep nudging windows for a
 // second or two after the topology changes, so we re-check a few times.
 const int kPassDelays[] = {100, 250, 500, 900, 1600};
@@ -271,7 +273,19 @@ class App {
   void StartRetry(const std::vector<std::wstring>& names, const std::wstring& command);
   void CancelWake(bool runOffHooks);
   void OnWakeTimer();
-  bool RecentlyWoken(const std::wstring& name);
+  bool replaying_ = false;  // set while a wake/retry replays its command: its hooks already ran
+  // followPower: a TV turned on/off with its own remote "re-plugs" for a moment; that blip flips its mode
+  bool followAction_ = false;            // switch caused by the TV's own remote: no hooks, it already happened
+  ULONGLONG followQuietUntil_ = 0;       // blips right after any switch are boot hiccups or our own doing
+  std::wstring followPending_;
+  std::map<std::wstring, bool> tvMode_;  // lower-case display -> DisplayFlip is using it
+  HDEVNOTIFY devNotify_ = nullptr;
+  void OnMonitorPnp(const std::wstring& path, bool arrival);
+  void OnFollowTimer();
+  void NoteTvModes();
+  // after turning a TV on it can blip again once it finishes booting; after turning it off only our
+  // own Google "off" causes a blip a few seconds later
+  void QuietAfterFollowSwitch(bool turnedOn) { followQuietUntil_ = NowMs() + (turnedOn ? 90000 : 10000); }
   std::vector<std::wstring> AsleepDisplays();  // configured with onTurnOn but not visible to Windows
 
   // audio
@@ -398,6 +412,12 @@ int App::Run(HINSTANCE inst, const std::wstring& first) {
   hookMove_ = SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZESTART, nullptr, WinEventThunk, 0, 0,
                               WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
   UpdateRuleHook();
+  DEV_BROADCAST_DEVICEINTERFACE_W filter = {};  // monitor plug/unplug (HDMI hot-plug) notifications
+  filter.dbcc_size = sizeof(filter);
+  filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+  filter.dbcc_classguid = kMonitorInterface;
+  devNotify_ = RegisterDeviceNotificationW(wnd_, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
+  NoteTvModes();
   SetTimer(wnd_, T_SNAPSHOT, 4000, nullptr);
   SetTimer(wnd_, T_CONFIG, 1500, nullptr);
   int on = 0;
@@ -426,6 +446,7 @@ int App::Run(HINSTANCE inst, const std::wstring& first) {
     nid.uID = 1;
     Shell_NotifyIconW(NIM_DELETE, &nid);
   }
+  if (devNotify_) UnregisterDeviceNotification(devNotify_);
   if (hookShow_) UnhookWinEvent(hookShow_);
   if (hookMove_) UnhookWinEvent(hookMove_);
   audio_.Shutdown();
@@ -455,6 +476,11 @@ LRESULT App::Proc(HWND h, UINT m, WPARAM w, LPARAM l) {
       Exec(Widen(s), (HWND)w);
       return TRUE;
     }
+    case WM_DEVICECHANGE:
+      if ((w == DBT_DEVICEARRIVAL || w == DBT_DEVICEREMOVECOMPLETE) && l &&
+          ((DEV_BROADCAST_HDR*)l)->dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE)
+        OnMonitorPnp(((DEV_BROADCAST_DEVICEINTERFACE_W*)l)->dbcc_name, w == DBT_DEVICEARRIVAL);
+      return TRUE;
     case WM_DISPLAYCHANGE:
       OnDisplayChange();
       break;
@@ -474,6 +500,7 @@ LRESULT App::Proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         case T_RULES: ProcessPendingRules(); break;
         case T_SAVE: KillTimer(h, T_SAVE); SaveState(); break;
         case T_WAKE: OnWakeTimer(); break;
+        case T_FOLLOW: OnFollowTimer(); break;
       }
       return 0;
     case WM_APP_AUDIO:
@@ -679,7 +706,9 @@ std::string App::DoMonitor(const std::wstring& specIn, const std::wstring& actio
   bool on = action == L"on" ? true : action == L"off" ? false : !mon.active;
   if (on == mon.active) {
     // Windows already has it that way, but the TV itself may not (its own remote, "no signal" screen...)
-    if (mc) RunHooks(on ? mc->onTurnOn : mc->onTurnOff, mon.name, on ? L"on" : L"off");
+    if (mc && !followAction_) RunHooks(on ? mc->onTurnOn : mc->onTurnOff, mon.name, on ? L"on" : L"off");
+    tvMode_[Lower(mon.label)] = on;
+    QuietAfterFollowSwitch(on);
     if (on && mc && !IsNone(mc->audio)) RequestAudio(IEquals(mc->audio, L"auto") ? L"monitor:" + mon.name : mc->audio, false);
     if (cfg_.osd) osd_.Show(mon.label + (on ? L" is on" : L" is off"), L"", OsdKind::Info, 1000, cfg_.osdPosition);
     return "ok: unchanged";
@@ -696,25 +725,21 @@ std::string App::DoMonitor(const std::wstring& specIn, const std::wstring& actio
       if (IEquals(mc->audio, L"auto")) s.audioAfter = L"monitor:" + mon.name;
       else if (!IsNone(mc->audio)) s.audioAfter = mc->audio;
       s.micAfter = mc->mic;
-      if (!RecentlyWoken(mon.name)) s.hooksBefore.push_back({mc->onTurnOn, mon.name, L"on"});
+      if (!replaying_ && !followAction_) s.hooksBefore.push_back({mc->onTurnOn, mon.name, L"on"});
       if (!s.hooksBefore.empty() && !s.hooksBefore.back().cmds.empty())
         s.replay = L"monitor " + QuoteArg(mon.label) + L" on";
     }
     s.expectOn.push_back(key);
+    if (followAction_) s.replay = L"monitor " + QuoteArg(mon.label) + L" on";  // still booting: keep trying
   } else {
     std::wstring pp;
     if (const LiveMonitor* p = FindMonitor(mons_, cfg_.preferredPrimary)) pp = p->key;
     s.apply = [key, pp](std::wstring* err) { return DisableMonitor(key, pp, err); };
     if (mc && AudioIsOn(*mc, mon)) s.audioBefore = L"previous";
     if (mc && !mc->mic.empty()) s.micAfter = L"previous";
-    if (mc) s.hooksAfter.push_back({mc->onTurnOff, mon.name, L"off"});
+    if (mc && !followAction_) s.hooksAfter.push_back({mc->onTurnOff, mon.name, L"off"});
   }
   return DoSwitch(s) ? "ok" : "error";
-}
-
-bool App::RecentlyWoken(const std::wstring& name) {
-  auto it = recentWake_.find(Lower(name));
-  return it != recentWake_.end() && NowMs() - it->second < 60000;
 }
 
 std::vector<std::wstring> App::AsleepDisplays() {
@@ -793,10 +818,14 @@ void App::OnWakeTimer() {
   wake_.active = false;
   if (all) {
     Log(w.notBefore ? L"retrying after %llu ms" : L"woken display(s) visible after %llu ms", NowMs() - w.since);
+    replaying_ = true;
     Exec(w.command, nullptr);
+    replaying_ = false;
   } else if (w.applyAnyway) {
     Log(L"display(s) did not wake in time, applying without them");
-    Exec(w.command, nullptr);  // RecentlyWoken() keeps it from waiting again
+    replaying_ = true;  // keeps it from waking/waiting again
+    Exec(w.command, nullptr);
+    replaying_ = false;
   } else {
     std::wstring who;
     for (auto& n : w.names) who += (who.empty() ? L"" : L", ") + n;
@@ -844,7 +873,7 @@ std::string App::DoProfile(const std::wstring& nameIn) {
     for (auto& p : pd.snap.paths) {
       if (connected.count(p.key) || p.name.empty()) continue;
       const MonitorCfg* mc = cfg_.MonitorByName(p.name);
-      if (mc && !mc->onTurnOn.empty() && !RecentlyWoken(mc->match)) wake.push_back(mc->match);
+      if (mc && !mc->onTurnOn.empty() && !replaying_) wake.push_back(mc->match);
     }
     if (!wake.empty()) {
       StartWake(wake, L"profile " + QuoteArg(name), true);
@@ -864,7 +893,7 @@ std::string App::DoProfile(const std::wstring& nameIn) {
     const MonitorCfg* mc = cfg_.Monitor(m);
     if (!mc || !mc->HasHooks()) continue;
     bool willOn = willBeOn.count(m.key) > 0;
-    if (!m.active && willOn && !RecentlyWoken(m.name)) s.hooksBefore.push_back({mc->onTurnOn, m.name, L"on"});
+    if (!m.active && willOn && !replaying_) s.hooksBefore.push_back({mc->onTurnOn, m.name, L"on"});
     if (m.active && !willOn) s.hooksAfter.push_back({mc->onTurnOff, m.name, L"off"});
   }
   for (auto& m : mons_)
@@ -1065,6 +1094,14 @@ bool App::DoSwitch(const SwitchSpec& s) {
   lastSwitchEnd_ = NowMs();
   switchEnd32_ = GetTickCount();
   suppressUntil_ = NowMs() + 2500;
+  bool turnedOn = false;
+  for (auto& c : cfg_.monitors) {
+    if (!c.followPower) continue;
+    const LiveMonitor* m = FindMonitor(mons_, c.match);
+    if (m && m->active && !tvMode_[Lower(c.match)]) turnedOn = true;
+  }
+  NoteTvModes();
+  QuietAfterFollowSwitch(turnedOn);
   freezeSnapshotUntil_ = NowMs() + 3000;
 
   // 7) feedback
@@ -1130,6 +1167,44 @@ std::string App::RestoreNow() {
 }
 
 // ---- audio -----------------------------------------------------------------
+void App::NoteTvModes() {
+  for (auto& c : cfg_.monitors) {
+    if (!c.followPower) continue;
+    const LiveMonitor* m = FindMonitor(mons_, c.match);
+    tvMode_[Lower(c.match)] = m && m->active;
+  }
+}
+
+void App::OnMonitorPnp(const std::wstring& pathIn, bool arrival) {
+  std::wstring path = Lower(pathIn), name;
+  for (auto& kv : monMem_)
+    if (kv.first == path) name = kv.second.name;
+  for (auto& m : mons_)
+    if (m.key == path) name = m.name;
+  const MonitorCfg* mc = name.empty() ? nullptr : cfg_.MonitorByName(name);
+  if (!mc || !mc->followPower) return;
+  Log(L"%ls %ls (its power button?)", name.c_str(), arrival ? L"plugged back in" : L"dropped off");
+  if (switching_ || wake_.active || NowMs() < followQuietUntil_) {
+    Log(L"  ignored: settling after a switch");
+    return;
+  }
+  followPending_ = mc->match;
+  SetTimer(wnd_, T_FOLLOW, 2500, nullptr);  // let the blip finish first
+}
+
+void App::OnFollowTimer() {
+  KillTimer(wnd_, T_FOLLOW);
+  std::wstring name = followPending_;
+  followPending_.clear();
+  if (name.empty() || switching_ || NowMs() < followQuietUntil_) return;
+  bool inUse = tvMode_[Lower(name)];
+  Log(L"follow: %ls was switched with its own remote while %ls -> turning it %ls", name.c_str(),
+      inUse ? L"in use" : L"not in use", inUse ? L"off" : L"on");
+  followAction_ = true;
+  Exec(L"monitor " + QuoteArg(name) + (inUse ? L" off" : L" on"), nullptr);
+  followAction_ = false;
+}
+
 bool App::ResolveAudio(const std::wstring& spec, bool capture, AudioDevice& out) {
   if (IEquals(spec, L"previous")) {
     const std::wstring& prev = capture ? micPrevId_ : audioPrevId_;
