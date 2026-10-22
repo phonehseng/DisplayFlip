@@ -1050,6 +1050,15 @@ bool App::DoSwitch(const SwitchSpec& s) {
     for (auto& m : mons_)
       if (m.key == k && m.active) retryWin_.erase(Lower(m.label));
   bool retrying = !retryCmd.empty();
+  if (!missingLabels.empty() && !retrying) {
+    // Windows accepted the layout (and saved it as "TV on" in its own display memory) but the TV never lit
+    // up. Re-save what is really active, or Windows switches the TV back on by itself when it next wakes.
+    DisplaySnap now;
+    std::wstring e2;
+    if (CaptureSnap(now) && ApplySnap(now, &e2)) Log(L"saved the layout without %ls back to Windows", missingLabels[0].c_str());
+    mons_ = QueryMonitors();
+    newTopo = TopologyKey(mons_);
+  }
   if (!missingLabels.empty() && !retrying && newTopo == oldTopo) ok = false;  // nothing changed at all
   topo_ = newTopo;
   fingerprint_ = Fingerprint();
