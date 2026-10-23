@@ -77,7 +77,6 @@ primary "LG ULTRAGEAR+"          make a display the main one
 save "Rig"                       save the current layout as a profile
 audio "Headphones"               set the default playback device (mic "..." for recording)
 restore                          put windows back after the last switch
-hook "Philips GA4" off|on        run a display's onTurnOff/onTurnOn commands (testing)
 status | list | diag | windows   show state (diag also goes to the log)
 settings | log | reload | quit
 ```
@@ -99,8 +98,7 @@ Displays are named as in the tray menu. Identical monitors (triple screens) get 
   "preferredPrimary": "LG ULTRAGEAR+",       // who becomes main if the main display is turned off
 
   "monitors": {
-    "Philips GA4": { "audio": "auto",        // sound follows this display (its own HDMI audio)
-                     "onTurnOff": ["tv-off.cmd"], "onTurnOn": ["tv-on.cmd"] },   // see "Turning the TV itself off"
+    "Philips GA4": { "audio": "auto" },      // sound follows this display (its own HDMI audio)
     "Projector":   { "audio": "Denon AVR" }  // ...or a specific device, e.g. an AV receiver
   },
 
@@ -145,69 +143,6 @@ Hotkey keys: `A`–`Z`, `0`–`9`, `F1`–`F24`, `Numpad0`–`Numpad9`, arrows, 
 `Insert`, `Delete`, `Space`, `Pause`, `ScrollLock`, media keys, punctuation, with `Ctrl`, `Alt`, `Shift`, `Win`.
 F13–F24 make good Stream Deck/macro-key combos because no keyboard uses them.
 
-## Turning the TV itself off and on
-
-When DisplayFlip turns a display off, Windows just stops sending it a picture; PC graphics cards can't send
-the HDMI-CEC "standby" or "power on" signals a console would. So without help, a TV that is in standby stays
-dark when you switch to it (DisplayFlip tells you so instead of failing silently). Give the display `onTurnOff` / `onTurnOn` commands and
-DisplayFlip runs them at the right moment: `onTurnOn` right before the output comes back (so the TV wakes in
-parallel), `onTurnOff` once nothing is shown on it any more.
-
-```jsonc
-"monitors": {
-  "Philips GA4": {
-    "audio": "auto",
-    "onTurnOff": ["tv-off.cmd"],
-    "onTurnOn": ["tv-on.cmd"],
-    "waitForDisplayMs": 15000   // a TV that vanishes in standby: how long to wait for it after waking it
-  }
-}
-```
-
-- Commands run hidden, one after another, from `%APPDATA%\DisplayFlip`, with `%DISPLAYFLIP_DISPLAY%` and
-  `%DISPLAYFLIP_EVENT%` (`on`/`off`) set. Their output goes to `hooks.log` in that folder.
-- `DisplayFlip.exe hook "Philips GA4" off` runs the commands without switching anything, for testing.
-- Some TVs disappear from Windows completely in standby. DisplayFlip then shows them in the tray as
-  *(asleep)*: pressing the button runs `onTurnOn`, waits for the TV to show up, then turns it on.
-  Pressing again while it's waking cancels and sends it back to standby.
-
-Ready-made options:
-
-| | |
-|---|---|
-| **Google TV / Google Home** (no hardware; works even when the PC and TV can't see each other on the network) | [`examples/tv-google.cmd`](examples/tv-google.cmd) sends "turn off dorm TV" / "turn on dorm TV" through your Google account. One-time setup below |
-| **USB-CEC adapter** (Pulse-Eight, sits in the HDMI cable) | [`examples/tv-off.cmd`](examples/tv-off.cmd) / [`tv-on.cmd`](examples/tv-on.cmd) use libCEC's `cec-client` (standby / wake + switch input to the PC) |
-| **Google / Android TV over the network** | `adb connect 192.168.1.50 && adb -s 192.168.1.50:5555 shell input keyevent KEYCODE_SLEEP` (`KEYCODE_WAKEUP` to wake; needs network debugging on the TV) |
-| **Home Assistant / smart home** | `curl -s -X POST http://homeassistant.local:8123/api/webhook/tv_off` |
-
-Avoid cutting a TV's power with a smart plug: OLEDs run a screen-care cycle in standby after you turn them off.
-
-### Google TV setup (tv-google)
-
-1. **On the TV**, turn on **Network standby** and **Wake on network** (Settings → System → Power and energy, or
-   Network & Internet), and set **Cast** to available **Always**. With these, a TV in standby also wakes up by
-   itself when the PC's picture arrives, so turning it on works even without Google.
-2. **Google Cloud** (free, no billing): create a project, enable the **Google Assistant API**, set up the
-   OAuth consent screen (External; homepage and privacy links are required to publish; publish it so the sign-in
-   doesn't expire after 7 days), create an OAuth client of type **Desktop app** and save its JSON as
-   `%APPDATA%\DisplayFlip\client_secret.json`.
-3. Run `tv-google.cmd setup` in `%APPDATA%\DisplayFlip` once (installs its Python packages, then asks you to
-   approve in the browser; the app is unverified, so use Advanced → Go to DisplayFlip).
-4. In settings: `"onTurnOff": ["tv-google.cmd off dorm TV"], "onTurnOn": ["tv-google.cmd on dorm TV"]`, using the
-   TV's name from the Google Home app. `tv-google.cmd say is dorm TV on` sends any other command.
-
-### Following the TV's own remote (`followPower`)
-
-`"followPower": true` on a display makes DisplayFlip follow its power button: when you turn the TV on with its
-own remote, DisplayFlip switches to it (picture, sound, windows); when you turn it off, everything goes back to
-the desk. It works because a TV switching on or off briefly "re-plugs" its HDMI connection, which Windows
-reports. That blip doesn't say which way the TV went, so DisplayFlip flips its own mode, and ignores blips for
-90 s after switching to the TV (some TVs blip again once they finish booting) and 10 s after switching away. If
-it ever guesses wrong while the TV is actually off, nothing lights up and it simply stays at the desk.
-
-Notes: commands take about 2–3 s. Google doesn't charge for this API. It's an older Google API that may be
-retired as Google moves to Gemini; the CEC adapter is the fallback.
-
 ## Sim rig recipe
 
 1. Set the rig up (triple screens, the center one as main display, the refresh rates you race at) and
@@ -241,10 +176,8 @@ in profiles, but enabling/disabling Surround itself still happens in the NVIDIA 
 - **Hotkey doesn't work**: another app owns that combo; the OSD/log says so. Pick another in settings.
 - **An admin window (Task Manager, elevated terminal) doesn't move back**: Windows blocks normal apps
   from moving elevated windows. Run DisplayFlip elevated if you need that.
-- **TV doesn't come on**: a TV in standby ignores the PC's picture, and a PC can't power a TV on over plain
-  HDMI. DisplayFlip notices within about a second and says "didn't turn on"; turn the TV on with its remote and
-  press again, or give it `onTurnOn` commands (see above). With those, DisplayFlip waits a few seconds for the TV
-  to boot and tries once more. `DisplayFlip.exe diag` lists what Windows can see.
+- **TV doesn't come on**: some TVs disconnect HDMI completely in standby; turn the TV on first.
+  `DisplayFlip.exe diag` lists what Windows can see.
 - **Other display managers**: DisplayFusion's window-position features, DisplayMagician and similar tools can
   fight over the same windows/displays. Turn those features off (or quit those apps) if windows jump twice.
 - Log: tray > *Open log* (`%APPDATA%\DisplayFlip\displayflip.log`, includes timing for every switch).

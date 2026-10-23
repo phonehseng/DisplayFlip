@@ -2,6 +2,3 @@ build/
 dist/
 *.o
 *.exe
-# Google sign-in files live in %APPDATA%\DisplayFlip; never commit them
-client_secret*.json
-google-credentials.json

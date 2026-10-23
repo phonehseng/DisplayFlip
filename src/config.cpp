@@ -14,15 +14,6 @@ const MonitorCfg* Config::Monitor(const LiveMonitor& m) const {
   return nullptr;
 }
 
-const MonitorCfg* Config::MonitorByName(const std::wstring& spec) const {
-  if (spec.empty()) return monitors.empty() ? nullptr : &monitors[0];
-  for (auto& c : monitors)
-    if (IEquals(c.match, spec)) return &c;
-  for (auto& c : monitors)
-    if (IContains(c.match, spec) || IContains(spec, c.match)) return &c;
-  return nullptr;
-}
-
 const ProfileCfg* Config::Profile(const std::wstring& name) const {
   for (auto& p : profiles)
     if (IEquals(p.name, name)) return &p;
@@ -69,10 +60,6 @@ bool LoadConfig(const std::wstring& path, Config& out, std::wstring* err) {
     else {
       m.audio = kv.second.str("audio");
       m.mic = kv.second.str("mic");
-      m.onTurnOn = kv.second["onTurnOn"].strList();
-      m.onTurnOff = kv.second["onTurnOff"].strList();
-      m.waitMs = (int)kv.second.num("waitForDisplayMs", m.waitMs);
-      m.followPower = kv.second.boolean("followPower", false);
     }
     c.monitors.push_back(m);
   }
@@ -179,11 +166,6 @@ std::string DefaultConfigText(const std::vector<LiveMonitor>& mons, Audio& audio
   s += "  \"monitors\": {\n";
   s += "    // \"audio\": \"auto\" = sound moves to this display's own HDMI/DisplayPort audio when it turns on,\n";
   s += "    // and goes back to what you used before when it turns off. Or name a device, e.g. an AV receiver.\n";
-  s += "    //\n";
-  s += "    // \"onTurnOff\" / \"onTurnOn\": commands run when DisplayFlip turns the display off/on, e.g. to put a\n";
-  s += "    // TV into standby through a USB-CEC adapter (output goes to hooks.log next to this file):\n";
-  s += "    //   \"onTurnOff\": [\"echo standby 0 | cec-client -s -d 1\"],\n";
-  s += "    //   \"onTurnOn\":  [\"echo on 0 | cec-client -s -d 1\", \"echo as | cec-client -s -d 1\"]\n";
   if (tv) s += "    " + Q(tv->label) + ": { \"audio\": \"auto\" }\n";
   else s += "    // \"My TV\": { \"audio\": \"auto\" }\n";
   s += "  },\n\n";

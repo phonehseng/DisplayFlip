@@ -212,10 +212,6 @@ int InstallCommand(bool quiet) {
   if (!src.empty() && !IStartsWith(src, dir)) CopyTree(src, dir + L"\\streamdeck\\" + kPluginId);
   std::wstring readme = ExeDir() + L"\\README.md";
   if (FileExists(readme) && !self) CopyFileW(readme.c_str(), (dir + L"\\README.md").c_str(), FALSE);
-  for (const wchar_t* ex : {L"tv-off.cmd", L"tv-on.cmd", L"tv-google.cmd", L"tv-google.py"}) {  // hook examples, next to config.json (never overwritten)
-    std::wstring from = ExeDir() + L"\\examples\\" + ex, to = DataDir() + L"\\" + ex;
-    if (FileExists(from) && !FileExists(to)) CopyFileW(from.c_str(), to.c_str(), TRUE);
-  }
 
   HKEY k;
   if (RegCreateKeyExW(HKEY_CURRENT_USER, kAppKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) == ERROR_SUCCESS) {

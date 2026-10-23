@@ -30,9 +30,6 @@ $sd = Join-Path $out "streamdeck"
 if (Test-Path $sd) { Remove-Item -Recurse -Force $sd }
 Copy-Item -Recurse (Join-Path $root "streamdeck") $sd
 Copy-Item (Join-Path $root "README.md") $out -ErrorAction SilentlyContinue
-$ex = Join-Path $out "examples"
-New-Item -ItemType Directory -Force $ex | Out-Null
-Copy-Item (Join-Path $root "examples\*") $ex -Force
 $size = [math]::Round((Get-Item "$out\DisplayFlip.exe").Length / 1KB)
 Write-Host "Built dist\DisplayFlip.exe ($size KB)"
 
